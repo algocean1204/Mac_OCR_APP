@@ -1,0 +1,72 @@
+# ===== Python =====
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+backend/.venv/
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# 다운로드된 AI 모델 (수 GB 크기)
+backend/AImodels/
+!backend/AImodels/.gitkeep
+
+# OCR 처리 임시 청크 파일
+backend/.tmp_ocr/
+
+# ===== Flutter =====
+frontend/build/
+frontend/.dart_tool/
+frontend/.flutter-plugins
+frontend/.flutter-plugins-dependencies
+frontend/.packages
+frontend/pubspec.lock
+
+# ===== macOS =====
+.DS_Store
+*/.DS_Store
+frontend/macos/Pods/
+frontend/macos/Flutter/ephemeral/
+frontend/macos/.symlinks/
+
+# ===== IDE =====
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.settings/
+*.iml
+
+# ===== 환경 =====
+.env
+.env.*
+credentials.*
+
+# ===== 인증서/키 =====
+*.pem
+*.key
+*.cert
+
+# ===== Xcode =====
+xcuserdata/
+*.xcworkspace/
+
+# ===== 내부 문서 (사용자 불필요) =====
+docs/OCR_문제점_Report.md
+docs/architecture.md
+docs/product-spec.md
+docs/project-context.md
+docs/security-spec.md
+
+# ===== 실험/개발 스크립트 =====
+backend/scripts/
+
+# ===== 기타 =====
+*.log
+*.tmp
+.claude/

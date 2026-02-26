@@ -1,0 +1,27 @@
+# ===== 직접 의존성 (프로젝트가 import하는 패키지) =====
+# Apple Silicon MLX 프레임워크
+mlx>=0.30.0
+mlx-lm>=0.30.0
+mlx-vlm>=0.3.12
+
+# OCR 파이프라인 핵심
+pillow>=12.0.0
+PyMuPDF>=1.25.0
+reportlab>=4.0.0
+psutil>=5.9.0
+huggingface_hub>=0.25.0
+transformers>=4.45.0
+
+# ===== 간접 의존성 (직접 의존성이 끌어오는 패키지) =====
+# pip install 시 자동 해석되므로 별도 고정이 불필요하나,
+# 재현성을 위해 개발 환경 기준 버전을 기록한다.
+numpy>=2.0.0
+safetensors>=0.4.0
+tokenizers>=0.20.0
+sentencepiece>=0.2.0
+requests>=2.31.0
+tqdm>=4.66.0
+PyYAML>=6.0.0
+Jinja2>=3.1.0
+regex>=2024.0.0
+packaging>=24.0

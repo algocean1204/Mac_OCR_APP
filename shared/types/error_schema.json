@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "OCR Error Message",
+  "description": "Python 백엔드 -> Flutter 프론트엔드 stderr 에러 메시지 스키마",
+  "oneOf": [
+    {
+      "title": "Fatal Error",
+      "description": "복구 불가능한 치명적 에러",
+      "type": "object",
+      "properties": {
+        "type": { "const": "error" },
+        "code": {
+          "type": "string",
+          "pattern": "^E[0-9]{3}$",
+          "description": "에러 코드 (E001 ~ E051)"
+        },
+        "message": {
+          "type": "string",
+          "description": "사용자에게 표시할 에러 메시지 (한국어)"
+        },
+        "details": {
+          "type": "string",
+          "description": "디버깅용 상세 에러 정보"
+        },
+        "recoverable": {
+          "type": "boolean",
+          "description": "복구 가능 여부"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["type", "code", "message", "recoverable", "timestamp"]
+    },
+    {
+      "title": "Page Error",
+      "description": "개별 페이지 처리 실패 — 건너뛰고 계속 진행한다",
+      "type": "object",
+      "properties": {
+        "type": { "const": "page_error" },
+        "page": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "실패한 페이지 번호 (1-based)"
+        },
+        "code": {
+          "type": "string",
+          "pattern": "^E[0-9]{3}$"
+        },
+        "message": { "type": "string" },
+        "details": { "type": "string" },
+        "recoverable": { "type": "boolean", "const": true },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["type", "page", "code", "message", "recoverable", "timestamp"]
+    }
+  ]
+}

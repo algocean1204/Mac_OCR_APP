@@ -1,0 +1,5 @@
+# 다운로드된 모델 파일은 Git에서 제외한다
+# .gitkeep 파일만 추적한다
+*
+!.gitkeep
+!.gitignore
