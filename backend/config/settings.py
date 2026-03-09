@@ -10,16 +10,16 @@ from pathlib import Path
 from backend.config.model_registry import (
     DEFAULT_OCR_MODEL,
     DEFAULT_POST_MODEL,
+    DEFAULT_POST_MODELS,
     SUPPORTED_MODELS,
     calculate_max_workers,
     get_system_ram_gb,
 )
 
 
-# HuggingFace 모델 식별자 — mlx-community 허브의 8bit 양자화 OCR 비전 모델을 사용한다
-# bf16(13.6GB)은 정밀도는 높지만 추론 속도가 ~10배 느려 실용성이 떨어진다
-# 8bit(5GB)이 속도/품질 균형에서 최적이다
-MODEL_ID: str = "mlx-community/DeepSeek-OCR-2-8bit"
+# HuggingFace 모델 식별자 — transformers + torch 기반 GLM-OCR 비전 모델을 사용한다
+# MPS(Metal Performance Shaders) 가속으로 Apple Silicon에서 고속 추론한다
+MODEL_ID: str = "zai-org/GLM-OCR"
 
 # 모델 캐시 저장 경로 — 프로젝트 루트 기준 backend/AImodels에 보관한다
 MODEL_CACHE_DIR: Path = Path(__file__).resolve().parent.parent / "AImodels"
@@ -30,8 +30,9 @@ DEFAULT_DPI: int = 300
 # 페이지당 최대 생성 토큰 수 — grounding 태그와 좌표 출력을 충분히 담기 위해 16384로 확장한다
 MAX_TOKENS: int = 16384
 
-# 이미지 최대 크기 (픽셀) — 너무 큰 이미지는 메모리 문제를 일으킬 수 있으므로 5120으로 제한한다
-MAX_IMAGE_SIZE: int = 5120
+# 이미지 최대 크기 (픽셀) — MPS 메모리 제한을 고려하여 2048로 제한한다
+# 300dpi PDF 페이지(~2480x3508)는 이 크기로 축소된다
+MAX_IMAGE_SIZE: int = 2048
 
 # 메모리 임계값 (MB 단위)
 MEMORY_WARNING_MB: int = 4000   # 경고 수준 — 강제 GC 실행
@@ -51,14 +52,18 @@ CHUNK_SIZE: int = 10
 # 출력 파일 기본 저장 경로
 OUTPUT_DIR: Path = Path.home() / "Downloads"
 
-# 후처리 모델 기본 ID — 한국어 교정을 위한 Qwen3-8B-4bit 모델
+# 후처리 모델 기본 ID — 한국어 교정을 위한 EXAONE 모델
 POST_PROCESS_MODEL_ID: str = SUPPORTED_MODELS[DEFAULT_POST_MODEL].model_id
+
+# 순차 후처리 모델 별칭 목록 — OCR 완료 후 순서대로 적용한다
+POST_PROCESS_MODEL_ALIASES: list[str] = DEFAULT_POST_MODELS
 
 # 후처리 활성화 기본값 — OCR 품질 향상을 위해 기본 활성화한다
 ENABLE_POST_PROCESS: bool = True
 
-# 후처리 모드 기본값 — "korean" (한국어 교정) 또는 "reasoning" (추론 검증)
-POST_PROCESS_MODE: str = "korean"
+# 후처리 모드 기본값 — "ensemble" (3모델 앙상블), "korean", "reasoning"
+# ensemble: 3개 모델이 독립 교정 → 투표로 최종 결정 (권장)
+POST_PROCESS_MODE: str = "ensemble"
 
 
 @dataclass
@@ -87,8 +92,12 @@ class PipelineConfig:
     max_tokens: int = field(default=MAX_TOKENS)
     # 이미지 최대 크기 (픽셀) — 초과 시 비율 유지하며 축소하여 메모리를 절약한다
     max_image_size: int = field(default=MAX_IMAGE_SIZE)
-    # 후처리 LLM 모델 ID — OCR 결과의 한국어 교정에 사용한다
+    # 후처리 LLM 모델 ID — 단일 모델 후처리 시 사용 (하위 호환)
     post_process_model_id: str = field(default=POST_PROCESS_MODEL_ID)
+    # 순차 후처리 모델 별칭 목록 — OCR 완료 후 순서대로 적용한다
+    post_model_aliases: list[str] = field(
+        default_factory=lambda: list(POST_PROCESS_MODEL_ALIASES)
+    )
     # 후처리 활성화 여부 — True이면 OCR 후 LLM 교정 단계를 추가한다
     enable_post_process: bool = field(default=ENABLE_POST_PROCESS)
     # 후처리 모드 — "korean" (한국어 교정) 또는 "reasoning" (추론 검증)
@@ -194,8 +203,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--post-mode",
         default=POST_PROCESS_MODE,
-        choices=["korean", "reasoning"],
-        help=f"후처리 모드 — korean 또는 reasoning (기본값: {POST_PROCESS_MODE})",
+        choices=["ensemble", "korean", "proper_noun", "reasoning"],
+        help=f"후처리 모드 — ensemble, korean, proper_noun, reasoning (기본값: {POST_PROCESS_MODE})",
     )
     return parser
 
@@ -214,21 +223,18 @@ def load_config(argv: list[str] | None = None) -> PipelineConfig:
     enable_post = args.post_process or os.environ.get("OCR_POST_PROCESS", "").lower() in ("1", "true")
     post_mode = os.environ.get("OCR_POST_MODE", args.post_mode)
 
-    # 후처리 활성화 시 워커 수를 자동 조절한다
+    # 순차 후처리: OCR과 후처리가 분리되므로 워커 수는 OCR 모델만 고려한다
+    # 후처리 모델은 OCR 완료 후 순차 로드되어 메모리가 겹치지 않는다
     num_workers = args.workers
-    if enable_post:
-        from backend.config.model_registry import get_model_spec_by_id
-        ocr_spec = get_model_spec_by_id(model_id)
-        post_spec = get_model_spec_by_id(post_model_id)
-        ocr_mem = ocr_spec.memory_gb if ocr_spec else 5.0
-        post_mem = post_spec.memory_gb if post_spec else 6.5
-        auto_workers = calculate_max_workers(
-            total_ram_gb=get_system_ram_gb(),
-            ocr_model_gb=ocr_mem,
-            post_model_gb=post_mem,
-        )
-        # 사용자 지정 워커 수와 자동 계산 값 중 작은 것을 사용한다
-        num_workers = min(num_workers, auto_workers)
+    from backend.config.model_registry import get_model_spec_by_id
+    ocr_spec = get_model_spec_by_id(model_id)
+    ocr_mem = ocr_spec.memory_gb if ocr_spec else 5.0
+    auto_workers = calculate_max_workers(
+        total_ram_gb=get_system_ram_gb(),
+        ocr_model_gb=ocr_mem,
+        post_model_gb=0.0,  # 후처리 모델은 OCR과 동시에 로드하지 않는다
+    )
+    num_workers = min(num_workers, auto_workers)
 
     return PipelineConfig(
         input_path=args.input,

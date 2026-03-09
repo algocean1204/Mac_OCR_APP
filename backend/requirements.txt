@@ -1,8 +1,12 @@
 # ===== 직접 의존성 (프로젝트가 import하는 패키지) =====
-# Apple Silicon MLX 프레임워크
+# OCR 비전 모델 (GLM-OCR) — transformers + torch
+torch>=2.4.0
+torchvision>=0.19.0
+transformers>=4.45.0
+
+# 후처리 LLM — Apple Silicon MLX 프레임워크
 mlx>=0.30.0
 mlx-lm>=0.30.0
-mlx-vlm>=0.3.12
 
 # OCR 파이프라인 핵심
 pillow>=12.0.0
@@ -10,7 +14,7 @@ PyMuPDF>=1.25.0
 reportlab>=4.0.0
 psutil>=5.9.0
 huggingface_hub>=0.25.0
-transformers>=4.45.0
+pytesseract>=0.3.10
 
 # ===== 간접 의존성 (직접 의존성이 끌어오는 패키지) =====
 # pip install 시 자동 해석되므로 별도 고정이 불필요하나,

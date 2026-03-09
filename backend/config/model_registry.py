@@ -15,8 +15,10 @@ class ModelRole(Enum):
 
 
 class ModelFramework(Enum):
-    """모델이 사용하는 MLX 프레임워크를 구분한다."""
-    MLX_VLM = "mlx_vlm"  # 비전-언어 모델 (이미지 입력 지원)
+    """모델이 사용하는 프레임워크를 구분한다."""
+    TRANSFORMERS_VLM = "transformers_vlm"  # transformers + torch 비전-언어 모델
+    TRANSFORMERS_LM = "transformers_lm"    # transformers + torch 텍스트 전용 모델
+    MLX_VLM = "mlx_vlm"  # mlx-vlm 비전-언어 모델 (이미지 입력 지원)
     MLX_LM = "mlx_lm"    # 텍스트 전용 언어 모델
 
 
@@ -35,25 +37,18 @@ class ModelSpec:
 # ── 지원 모델 레지스트리 ─────────────────────────────────────────────────────
 # 키: 사용자 친화적 별칭, 값: ModelSpec
 SUPPORTED_MODELS: dict[str, ModelSpec] = {
-    # --- OCR Vision 모델 (mlx-vlm) ---
-    "deepseek-ocr-bf16": ModelSpec(
-        model_id="mlx-community/DeepSeek-OCR-2-bf16",
+    # --- OCR Vision 모델 (transformers + torch) ---
+    "glm-ocr": ModelSpec(
+        model_id="zai-org/GLM-OCR",
         role=ModelRole.OCR_VISION,
-        framework=ModelFramework.MLX_VLM,
+        framework=ModelFramework.TRANSFORMERS_VLM,
         quantization="bf16",
-        memory_gb=13.6,
+        memory_gb=8.0,
         license_name="Apache-2.0",
-        description="DeepSeek OCR-2 BF16 — 최고 정밀도 OCR 비전 모델 (풀 프리시전)",
+        description="GLM-OCR BF16 — transformers 기반 OCR 비전 모델 (MPS 가속)",
     ),
-    "deepseek-ocr-8bit": ModelSpec(
-        model_id="mlx-community/DeepSeek-OCR-2-8bit",
-        role=ModelRole.OCR_VISION,
-        framework=ModelFramework.MLX_VLM,
-        quantization="8bit",
-        memory_gb=5.0,
-        license_name="MIT",
-        description="DeepSeek OCR-2 8비트 — 경량 OCR 비전 모델 (메모리 절약)",
-    ),
+
+    # --- OCR Vision 모델 (mlx-vlm) ---
     "qwen3-vl-8b-4bit": ModelSpec(
         model_id="mlx-community/Qwen3-VL-8B-Instruct-4bit",
         role=ModelRole.OCR_VISION,
@@ -151,9 +146,19 @@ SUPPORTED_MODELS: dict[str, ModelSpec] = {
 }
 
 # ── 기본 모델 별칭 ────────────────────────────────────────────────────────────
-DEFAULT_OCR_MODEL: str = "deepseek-ocr-8bit"
-DEFAULT_POST_MODEL: str = "qwen3-8b-4bit"
+DEFAULT_OCR_MODEL: str = "glm-ocr"
+DEFAULT_POST_MODEL: str = "exaone-7.8b-4bit"
 DEFAULT_REASONING_MODEL: str = "deepseek-r1-8b-4bit"
+
+# 순차 후처리 모델 목록 — OCR 완료 후 순서대로 적용한다
+# 메모리 관리: 각 모델을 로드 → 처리 → 언로드 방식으로 순차 실행한다
+# 앙상블 후처리: 3개 모델이 독립적으로 교정한 뒤 투표로 최종 결과를 결정한다
+# Qwen3(한국어·영어) → EXAONE(고유명사·문맥) → DeepSeek-R1(수학·코드·표)
+DEFAULT_POST_MODELS: list[str] = [
+    "qwen3-8b-4bit",          # 1차: 한국어·영어 텍스트 교정
+    "exaone-7.8b-4bit",       # 2차: 한국어 고유명사·문맥 검증
+    "deepseek-r1-8b-4bit",    # 3차: 수학·코드·표 구조 검증
+]
 
 
 def get_model_spec(alias: str) -> ModelSpec | None:

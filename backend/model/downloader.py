@@ -1,5 +1,5 @@
 # 모델 다운로드 모듈
-# HuggingFace Hub에서 mlx-vlm 모델을 다운로드하고 캐시를 관리한다
+# HuggingFace Hub에서 OCR/LLM 모델을 다운로드하고 캐시를 관리한다
 from __future__ import annotations
 
 from pathlib import Path

@@ -33,11 +33,22 @@ _BUNDLED_FONT_PATH: Path = (
 )
 _CJK_FONT_NAME: str = "Helvetica"
 
+# 폰트 메트릭 — drawString baseline 정밀 배치에 사용
+# ascent: baseline 위 높이 비율, descent: baseline 아래 높이 비율
+_FONT_ASCENT_RATIO: float = 0.766
+_FONT_DESCENT_RATIO: float = 0.234
+
 # 번들된 TTF 폰트 등록 시도 — 실패 시 Helvetica 폴백
 if _BUNDLED_FONT_PATH.exists():
     try:
         pdfmetrics.registerFont(TTFont("AppleGothic", str(_BUNDLED_FONT_PATH)))
         _CJK_FONT_NAME = "AppleGothic"
+        # 실제 폰트 메트릭에서 ascent/descent 비율을 계산한다
+        _face = pdfmetrics.getFont("AppleGothic").face
+        _em = _face.ascent - _face.descent
+        if _em > 0:
+            _FONT_ASCENT_RATIO = _face.ascent / _em
+            _FONT_DESCENT_RATIO = abs(_face.descent) / _em
     except Exception:
         # 폰트 등록 실패 시 기본 Helvetica 를 유지한다 (한국어 검색 불가)
         logger.warning("AppleGothic.ttf 등록 실패 — Helvetica 폴백 사용")
@@ -146,6 +157,47 @@ class PdfGenerator:
         """OCR 실패 시 텍스트 없이 이미지만으로 페이지를 추가한다."""
         self.add_page(image, "", page_width_pt, page_height_pt)
 
+    def add_page_with_block_results(
+        self,
+        image: Image.Image,
+        block_results: list[dict],
+        page_width_pt: float,
+        page_height_pt: float,
+    ) -> None:
+        """블록 파이프라인 OCR 결과로 PDF 페이지를 추가한다.
+
+        각 블록의 정규화 좌표(0~1 float)를 PDF 좌표로 변환하여
+        텍스트를 정확한 위치에 투명하게 배치한다.
+
+        Args:
+            image: 원본 페이지 이미지
+            block_results: BlockOcrResult를 직렬화한 딕셔너리 목록
+                각 항목: {"text": str, "bbox_norm": [x1,y1,x2,y2], ...}
+            page_width_pt: PDF 페이지 너비 (포인트)
+            page_height_pt: PDF 페이지 높이 (포인트)
+        """
+        try:
+            page_buf = _render_page_with_block_results(
+                image, block_results, page_width_pt, page_height_pt
+            )
+            page_bytes = page_buf.getvalue()
+            page_buf.close()
+
+            single_doc = fitz.open("pdf", page_bytes)
+            self._output_doc.insert_pdf(single_doc)
+            single_doc.close()
+            del page_bytes
+
+            self._page_count += 1
+
+        except OutputError:
+            raise
+        except Exception as exc:
+            raise OutputError(
+                code=ErrorCodes.OUTPUT_WRITE_FAILED,
+                detail=f"블록 결과 기반 페이지 {self._page_count + 1} 추가 실패: {exc}",
+            ) from exc
+
     @property
     def page_count(self) -> int:
         """현재 추가된 페이지 수를 반환한다."""
@@ -165,7 +217,7 @@ def _render_single_page(
     _draw_image_background(c, image, page_width, page_height)
 
     if ocr_text and ocr_text.strip():
-        _draw_transparent_text(c, ocr_text, page_width, page_height)
+        _draw_transparent_text_positioned(c, ocr_text, image, page_width, page_height)
 
     c.showPage()
     c.save()
@@ -224,34 +276,87 @@ def _draw_image_background(
     )
 
 
-def _draw_transparent_text(
+def _draw_transparent_text_positioned(
     canvas: rl_canvas.Canvas,
     text: str,
+    image: Image.Image,
     page_width: float,
     page_height: float,
 ) -> None:
-    """OCR 텍스트를 완전 투명한 폰트로 페이지에 배치한다."""
+    """OCR 텍스트를 Tesseract 위치 정보 기반으로 투명하게 배치한다.
+
+    Tesseract로 텍스트 영역을 감지하고, OCR 줄을 해당 영역에 배치한다.
+    줄 수 비슷하면 1:1 매칭, 많이 다르면 합쳐서 배치한다.
+    """
+    from backend.pdf.atoms.extract_line_positions import (
+        extract_text_region,
+        map_ocr_to_pdf_positions,
+    )
+
     transparent = Color(0, 0, 0, alpha=0)
     canvas.setFillColor(transparent)
     canvas.setStrokeColor(transparent)
 
-    lines = text.split("\n")
-    line_height: float = 12.0
-    font_size: float = 10.0
-    canvas.setFont(_CJK_FONT_NAME, font_size)
+    ocr_lines = [line for line in text.split("\n") if line.strip()]
+    if not ocr_lines:
+        canvas.setFillColor(black)
+        canvas.setStrokeColor(black)
+        return
 
-    y_pos: float = page_height - line_height
-    for line in lines:
-        if not line.strip():
-            y_pos -= line_height
-            continue
-        if y_pos < 0:
-            break
-        canvas.drawString(10, y_pos, line)
-        y_pos -= line_height
+    img_w, img_h = image.size
+    region = extract_text_region(image)
+
+    if region is not None:
+        result = map_ocr_to_pdf_positions(
+            region, ocr_lines, img_w, img_h, page_width, page_height,
+        )
+        _place_lines(canvas, result.lines)
+    else:
+        _place_lines_distributed(canvas, ocr_lines, page_width, page_height)
 
     canvas.setFillColor(black)
     canvas.setStrokeColor(black)
+
+
+def _place_lines(
+    canvas: rl_canvas.Canvas,
+    placed_lines: list,
+) -> None:
+    """PlacedLine 목록을 PDF에 배치한다."""
+    for pl in placed_lines:
+        font_size = max(6.0, min(pl.height * 0.85, 20.0))
+        canvas.setFont(_CJK_FONT_NAME, font_size)
+
+        # 텍스트 기준선을 박스 내에서 수직 중앙에 배치한다
+        y_line = pl.y + (pl.height - font_size) * 0.5
+        if y_line >= 0:
+            canvas.drawString(pl.x, y_line, pl.text)
+
+
+def _place_lines_distributed(
+    canvas: rl_canvas.Canvas,
+    ocr_lines: list[str],
+    page_width: float,
+    page_height: float,
+) -> None:
+    """Tesseract 사용 불가 시 페이지 전체에 균등 분배한다."""
+    margin_top = page_height * 0.05
+    margin_bottom = page_height * 0.05
+    margin_left = page_width * 0.05
+
+    usable_height = page_height - margin_top - margin_bottom
+    n_lines = len(ocr_lines)
+    line_height = min(usable_height / max(n_lines, 1), 20.0)
+    font_size = min(line_height * 0.85, 14.0)
+
+    canvas.setFont(_CJK_FONT_NAME, font_size)
+
+    y_pos = page_height - margin_top - font_size
+    for line in ocr_lines:
+        if y_pos < margin_bottom:
+            break
+        canvas.drawString(margin_left, y_pos, line)
+        y_pos -= line_height
 
 
 def _draw_transparent_text_blocks(
@@ -316,25 +421,28 @@ def _render_normal_block(
         return
 
     # 멀티라인 텍스트를 줄별로 분리하여 각 줄을 배치한다
-    # drawString은 개행 문자를 처리하지 못하므로 줄 단위로 호출해야 한다
-    lines = cleaned.split("\n")
+    lines = [l.strip() for l in cleaned.split("\n") if l.strip()]
     line_count = max(1, len(lines))
 
-    # 폰트 크기: 박스 높이를 줄 수로 나눈 값 기반 — 최소 4pt, 최대 24pt
-    font_size: float = max(4.0, min(h_pdf / line_count * 0.85, 24.0))
-    line_height: float = font_size * 1.15
+    # 초기 폰트 크기 = 블록 높이 / 줄 수 (상한)
+    per_line_h = h_pdf / line_count
+    font_size: float = max(3.0, min(per_line_h, 48.0))
+
+    # 텍스트가 블록 너비에 맞도록 축소
+    font_size = _fit_font_to_width(lines, font_size, w_pdf, _CJK_FONT_NAME)
+
     canvas.setFont(_CJK_FONT_NAME, font_size)
 
-    # 박스 상단(y_pdf + h_pdf)에서 아래로 한 줄씩 배치한다
-    y_start: float = y_pdf + h_pdf - font_size
+    # baseline 정밀 배치 — 각 줄 슬롯의 수직 중앙에 텍스트 배치
+    # CRAFT bbox는 실제 글자보다 상하 여유가 있으므로 중앙 정렬이 정확하다
+    block_top = y_pdf + h_pdf
+    vert_offset = font_size * (_FONT_ASCENT_RATIO - 0.5)
     for i, line in enumerate(lines):
-        line = line.strip()
-        if not line:
-            continue
-        y_line = y_start - (i * line_height)
-        if y_line < 0:
+        slot_center = block_top - (i + 0.5) * per_line_h
+        baseline_y = slot_center - vert_offset
+        if baseline_y < 0:
             break
-        canvas.drawString(x_pdf, y_line, line)
+        canvas.drawString(x_pdf, baseline_y, line)
 
 
 def _render_table_blocks(
@@ -368,9 +476,125 @@ def _render_table_blocks(
             row_bbox, img_width, img_height, page_width, page_height
         )
 
-        font_size: float = max(4.0, min(h_pdf * 0.85, 24.0))
+        font_size: float = max(3.0, min(h_pdf, 48.0))
+        font_size = _fit_font_to_width(
+            [cleaned], font_size, w_pdf, _CJK_FONT_NAME,
+        )
         canvas.setFont(_CJK_FONT_NAME, font_size)
 
-        y_line = y_pdf + h_pdf - font_size
-        if y_line >= 0:
-            canvas.drawString(x_pdf, y_line, cleaned)
+        # 수직 중앙 정렬
+        slot_center = y_pdf + h_pdf * 0.5
+        baseline_y = slot_center - font_size * (_FONT_ASCENT_RATIO - 0.5)
+        if baseline_y >= 0:
+            canvas.drawString(x_pdf, baseline_y, cleaned)
+
+
+def _render_page_with_block_results(
+    image: Image.Image,
+    block_results: list[dict],
+    page_width: float,
+    page_height: float,
+) -> io.BytesIO:
+    """블록 파이프라인 결과를 기반으로 단일 페이지 PDF를 생성한다.
+
+    각 블록의 정규화 좌표(0~1 float)를 PDF 좌표로 변환하여
+    투명 텍스트를 정확한 위치에 배치한다.
+    """
+    buf = io.BytesIO()
+    c = rl_canvas.Canvas(buf, pagesize=(page_width, page_height))
+
+    _draw_image_background(c, image, page_width, page_height)
+
+    if block_results:
+        transparent = Color(0, 0, 0, alpha=0)
+        c.setFillColor(transparent)
+        c.setStrokeColor(transparent)
+
+        for br in block_results:
+            text = br.get("text", "").strip()
+            if not text:
+                continue
+
+            bbox = br.get("bbox_norm", [0, 0, 1, 1])
+            nx1, ny1, nx2, ny2 = bbox[0], bbox[1], bbox[2], bbox[3]
+
+            # 정규화 좌표(0~1) → PDF 좌표
+            x_pdf = nx1 * page_width
+            w_pdf = (nx2 - nx1) * page_width
+            h_pdf = (ny2 - ny1) * page_height
+            y_pdf = page_height - ny2 * page_height  # reportlab 좌하단 원점
+
+            # 마크다운 프롬프트 누출 문자 제거
+            cleaned = clean_text(text)
+            if not cleaned:
+                continue
+
+            # 멀티라인 텍스트를 줄별로 분리하여 렌더링한다
+            lines = [l.strip() for l in cleaned.split("\n") if l.strip()]
+            if not lines:
+                continue
+
+            line_count = len(lines)
+
+            # 초기 폰트 크기 = 블록 높이 / 줄 수 (상한)
+            per_line_h = h_pdf / max(line_count, 1)
+            font_size: float = max(3.0, min(per_line_h, 48.0))
+
+            # 텍스트가 블록 너비에 맞도록 축소 — 실제 폰트 크기 결정
+            # CRAFT bbox 높이 > 실제 폰트 크기이므로 너비 기반이 더 정확
+            font_size = _fit_font_to_width(
+                lines, font_size, w_pdf, _CJK_FONT_NAME,
+            )
+
+            c.setFont(_CJK_FONT_NAME, font_size)
+
+            # baseline 정밀 배치:
+            # CRAFT bbox는 실제 글자보다 상하 여유가 있으므로
+            # 각 줄 슬롯의 수직 중앙에 텍스트를 배치한다
+            block_top = y_pdf + h_pdf
+            vert_offset = font_size * (_FONT_ASCENT_RATIO - 0.5)
+            for i, line in enumerate(lines):
+                slot_center = block_top - (i + 0.5) * per_line_h
+                baseline_y = slot_center - vert_offset
+                if baseline_y < 0:
+                    break
+                c.drawString(x_pdf, baseline_y, line)
+
+        c.setFillColor(black)
+        c.setStrokeColor(black)
+
+    c.showPage()
+    c.save()
+    buf.seek(0)
+    return buf
+
+
+def _fit_font_to_width(
+    lines: list[str],
+    font_size: float,
+    max_width: float,
+    font_name: str,
+) -> float:
+    """텍스트가 블록 너비를 초과하지 않도록 폰트 크기를 축소한다.
+
+    가장 긴 줄의 렌더링 너비가 블록 너비를 초과하면
+    비례적으로 폰트 크기를 줄여 정확히 맞춘다.
+    """
+    if max_width <= 0:
+        return font_size
+
+    max_text_width: float = 0.0
+    for line in lines:
+        text_width = pdfmetrics.stringWidth(line, font_name, font_size)
+        if text_width > max_text_width:
+            max_text_width = text_width
+
+    if max_text_width <= 0:
+        return font_size
+
+    # 텍스트가 블록 너비를 초과하면 비례 축소
+    if max_text_width > max_width:
+        ratio = max_width / max_text_width
+        font_size = max(3.0, font_size * ratio)
+
+    return font_size

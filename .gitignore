@@ -66,6 +66,18 @@ docs/security-spec.md
 # ===== 실험/개발 스크립트 =====
 backend/scripts/
 
+# ===== 테스트/디버그 출력 =====
+Test/
+Test_IMG/
+Fine.md
+
+# ===== 사용자 개인 파일 =====
+*.pdf
+!docs/**/*.pdf
+
+# ===== pip 아티팩트 =====
+=*
+
 # ===== 기타 =====
 *.log
 *.tmp
