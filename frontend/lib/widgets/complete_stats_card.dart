@@ -78,6 +78,17 @@ class CompleteStatsCard extends StatelessWidget {
             icon: Icons.timer_rounded,
             isDark: isDark,
           ),
+          // 페이지당 처리 속도 표시
+          if (result.totalPages > 0 && result.elapsedSeconds > 0) ...[
+            const Divider(height: 1, color: AppColors.divider),
+            _buildStatRow(
+              label: '속도',
+              value:
+                  '${(result.totalPages / result.elapsedSeconds * 60).toStringAsFixed(1)} 페이지/분',
+              icon: Icons.speed_rounded,
+              isDark: isDark,
+            ),
+          ],
         ],
       ),
     );

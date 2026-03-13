@@ -175,7 +175,12 @@ class _DropZoneState extends State<DropZone> {
 
     if (details.files.isEmpty) return;
 
-    // 첫 번째 드롭 파일만 처리 (다중 파일 지원 안 함)
+    // 다중 파일 드롭 시 경고 — 첫 번째 파일만 처리한다
+    if (details.files.length > 1) {
+      widget.onInvalidFile
+          ?.call('한 번에 하나의 PDF만 처리할 수 있습니다. 첫 번째 파일을 사용합니다.');
+    }
+
     final file = details.files.first;
     final path = file.path;
 

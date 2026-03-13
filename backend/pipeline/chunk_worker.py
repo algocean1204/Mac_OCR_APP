@@ -196,10 +196,14 @@ def _process_single_page(
     try:
         image = extractor.extract_page_image(page_num)
 
-        # 블록 파이프라인 시도
-        block_results = _try_block_pipeline(
-            model, processor, device, image, page_num, max_tokens,
-        )
+        # 블록 파이프라인 조건화: 표가 감지된 페이지만 시도한다
+        # CRAFT(CPU) 8-15초 오버헤드를 표 없는 페이지에서 절약한다
+        from backend.ocr.atoms.quick_table_check import quick_table_check
+        block_results = None
+        if quick_table_check(image):
+            block_results = _try_block_pipeline(
+                model, processor, device, image, page_num, max_tokens,
+            )
 
         if block_results is not None:
             # 블록 결과에서 전체 텍스트 추출
@@ -217,7 +221,16 @@ def _process_single_page(
             ocr_timeout, max_tokens, max_image_size,
         )
         plain_text = _apply_text_correction(plain_text)
-        return {"page_num": page_num, "text": plain_text, "block_results": None}
+
+        # Phase 3 Tesseract 재호출 방지: 위치 정보를 미리 추출하여 캐시한다
+        line_positions = _extract_line_positions_for_cache(image)
+
+        return {
+            "page_num": page_num,
+            "text": plain_text,
+            "block_results": None,
+            "line_positions": line_positions,
+        }
 
     finally:
         if image is not None:
@@ -263,6 +276,32 @@ def _try_block_pipeline(
 
         return block_dicts
 
+    except Exception:
+        return None
+
+
+def _extract_line_positions_for_cache(image: Image.Image) -> list[dict] | None:
+    """Tesseract 텍스트 위치를 추출하여 직렬화 가능한 딕셔너리 목록으로 반환한다.
+
+    Phase 1에서 미리 추출하여 Phase 3 PDF 생성 시 Tesseract 재호출을 방지한다.
+    Phase 1은 병렬 워커에서 실행되므로 순차 실행되는 Phase 3보다 효율적이다.
+
+    Args:
+        image: 원본 페이지 이미지 (OCR 전 리사이즈되지 않은 원본)
+
+    Returns:
+        [{"x", "y", "x2", "y2", "text"}] 목록, 실패 시 None
+    """
+    try:
+        from backend.pdf.atoms.extract_line_positions import extract_text_region
+
+        region = extract_text_region(image)
+        if region is None:
+            return None
+        return [
+            {"x": lp.x, "y": lp.y, "x2": lp.x2, "y2": lp.y2, "text": lp.text}
+            for lp in region.lines
+        ]
     except Exception:
         return None
 

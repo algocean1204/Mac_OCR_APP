@@ -173,6 +173,8 @@ class OcrEvent {
           workerProgressData: (json['worker_progress'] as List<dynamic>?)
               ?.map((e) => Map<String, dynamic>.from(e as Map))
               .toList(),
+          // Phase 2 후처리 시 활성 모델 이름을 캡처한다
+          modelName: json['model_name'] as String?,
           timestamp: json['timestamp'] as String?,
         );
 
@@ -202,6 +204,7 @@ class OcrEvent {
           errorCode: json['code'] as String?,
           errorMessage: json['message'] as String?,
           recoverable: true,
+          currentPage: json['page'] as int?,  // 실패한 페이지 번호를 캡처한다
           timestamp: json['timestamp'] as String?,
         );
 

@@ -2,6 +2,24 @@
 // progress 이벤트와 download 이벤트 수신 시 UI에 표시되는 데이터이다.
 // PDF 분할 진행률(SplitProgress) 모델도 포함한다.
 
+/// 로그 메시지 엔트리 — 백엔드에서 수신한 로그를 저장한다
+class LogEntry {
+  /// 로그 레벨 (debug / info / warn)
+  final String level;
+
+  /// 로그 메시지 본문
+  final String message;
+
+  /// 로그 수신 시각
+  final DateTime timestamp;
+
+  const LogEntry({
+    required this.level,
+    required this.message,
+    required this.timestamp,
+  });
+}
+
 /// 개별 워커의 진행률 데이터
 class WorkerProgress {
   /// 워커 ID (0-based)
@@ -46,6 +64,9 @@ class ProcessingProgress {
   /// 스킵된 페이지 수
   final int skippedPages;
 
+  /// 실패한 페이지 번호 목록 (page_error 이벤트에서 수집한다)
+  final List<int> failedPages;
+
   /// 총 워커 수 (병렬 처리 워커 개수)
   final int numWorkers;
 
@@ -64,6 +85,7 @@ class ProcessingProgress {
     required this.memoryMb,
     required this.startTime,
     required this.skippedPages,
+    this.failedPages = const [],
     this.numWorkers = 0,
     this.workerProgress = const [],
     this.ocrStartTime,
@@ -97,6 +119,7 @@ class ProcessingProgress {
     double? memoryMb,
     DateTime? startTime,
     int? skippedPages,
+    List<int>? failedPages,
     int? numWorkers,
     List<WorkerProgress>? workerProgress,
     DateTime? ocrStartTime,
@@ -109,6 +132,7 @@ class ProcessingProgress {
       memoryMb: memoryMb ?? this.memoryMb,
       startTime: startTime ?? this.startTime,
       skippedPages: skippedPages ?? this.skippedPages,
+      failedPages: failedPages ?? this.failedPages,
       numWorkers: numWorkers ?? this.numWorkers,
       workerProgress: workerProgress ?? this.workerProgress,
       ocrStartTime: ocrStartTime ?? this.ocrStartTime,

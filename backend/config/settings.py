@@ -24,14 +24,16 @@ MODEL_ID: str = "zai-org/GLM-OCR"
 # 모델 캐시 저장 경로 — 프로젝트 루트 기준 backend/AImodels에 보관한다
 MODEL_CACHE_DIR: Path = Path(__file__).resolve().parent.parent / "AImodels"
 
-# PDF → 이미지 변환 해상도 (DPI) — 300 DPI는 고품질 OCR 인식을 위한 최적 해상도다
-DEFAULT_DPI: int = 300
+# PDF → 이미지 변환 해상도 (DPI)
+# 200 DPI = 1654×2339px → MAX_IMAGE_SIZE(2048) 이내이므로 리사이즈 불필요
+# 고품질이 필요하면 CLI --dpi 300 옵션으로 오버라이드 가능
+DEFAULT_DPI: int = 200
 
 # 페이지당 최대 생성 토큰 수 — grounding 태그와 좌표 출력을 충분히 담기 위해 16384로 확장한다
 MAX_TOKENS: int = 16384
 
 # 이미지 최대 크기 (픽셀) — MPS 메모리 제한을 고려하여 2048로 제한한다
-# 300dpi PDF 페이지(~2480x3508)는 이 크기로 축소된다
+# 200dpi 기본값에서는 리사이즈 불필요, 300dpi 사용 시 이 크기로 축소된다
 MAX_IMAGE_SIZE: int = 2048
 
 # 메모리 임계값 (MB 단위)
@@ -42,9 +44,9 @@ MEMORY_FATAL_MB: int = 8000     # 치명 수준 — 부분 결과 저장 후 종
 # 페이지당 OCR 타임아웃 (초)
 OCR_TIMEOUT_SECONDS: int = 120
 
-# 병렬 워커 수 — 각 워커가 독립 모델 인스턴스를 로드한다 (2개 워커로 병렬 처리)
-# 후처리 LLM 필수화에 따라 메모리 안정성을 위해 3→2로 변경
-NUM_WORKERS: int = 2
+# OCR 워커 수 — 각 워커가 독립 모델(8GB)을 로드한다
+# 1개 워커 = 직렬 처리로 메모리 부하를 최소화한다 (8GB만 사용)
+NUM_WORKERS: int = 1
 
 # 청크 크기 — 워커가 N페이지씩 묶어 임시 PDF로 저장한다
 CHUNK_SIZE: int = 10

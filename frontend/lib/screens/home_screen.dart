@@ -3,6 +3,7 @@
 // 실제 UI 빌드는 HomeScreenBuilder에 위임한다.
 
 import 'dart:async';
+import 'dart:io';
 import 'package:flutter/material.dart';
 
 import '../constants/app_constants.dart';
@@ -37,12 +38,28 @@ class _HomeScreenState extends State<HomeScreen> {
   /// 현재 요청된 분할 권 수 (재시도 시 유지)
   int _currentSplitCount = 1;
 
+  /// Phase 1(OCR)에서 수신한 원래 총 페이지 수
+  /// Phase 2 후처리 시 모델별 진행률 계산에 사용한다.
+  int _originalTotalPages = 0;
+
   /// 모델 초기 설정 중 메시지 (서드파티 stderr 출력 감지 시 표시)
   String? _modelSetupMessage;
 
   /// complete 이벤트 수신 후 임시 저장되는 OCR 결과
   /// (split_complete 수신 전까지 split 정보가 없으므로 보관한다)
   OcrResult? _pendingOcrResult;
+
+  /// 로그 메시지 목록 (최근 50개까지 보관)
+  final List<LogEntry> _logEntries = [];
+
+  /// 메모리 경고 표시 여부
+  bool _showMemoryWarning = false;
+
+  /// 최근 메모리 경고 메시지
+  String? _memoryWarningMessage;
+
+  /// 현재 활성 모델 이름 (Phase 2 후처리 중)
+  String? _activeModelName;
 
   StreamSubscription<OcrEvent>? _ocrSubscription;
 
@@ -98,6 +115,21 @@ class _HomeScreenState extends State<HomeScreen> {
         );
   }
 
+  /// macOS 시스템 알림을 전송한다. (앱이 비활성 상태일 때 유용하다)
+  void _sendCompletionNotification(OcrResult result) {
+    try {
+      final pageInfo = result.totalPages > 0 ? '${result.totalPages}페이지' : '';
+      final timeInfo = result.formattedElapsedTime;
+      final subtitle = '$pageInfo 변환 완료 ($timeInfo)';
+      Process.run('osascript', [
+        '-e',
+        'display notification "$subtitle" with title "OCR Module" sound name "Glass"',
+      ]);
+    } catch (_) {
+      // 알림 실패는 무시한다 — 핵심 기능이 아니다
+    }
+  }
+
   // OCR 이벤트를 처리하여 상태를 업데이트한다.
   void _handleOcrEvent(OcrEvent event) {
     if (!mounted) return;
@@ -116,6 +148,8 @@ class _HomeScreenState extends State<HomeScreen> {
       case OcrEventType.init:
         setState(() {
           _appState = OcrAppState.processing;
+          // 원래 총 페이지 수를 저장 — Phase 2 후처리 진행률 계산에 사용
+          _originalTotalPages = event.totalPages ?? 0;
           _processingProgress = ProcessingProgress(
             currentPage: 0,
             totalPages: event.totalPages ?? 0,
@@ -150,6 +184,7 @@ class _HomeScreenState extends State<HomeScreen> {
             _appState = OcrAppState.complete;
             _ocrResult = result;
           });
+          _sendCompletionNotification(result);
         }
 
       case OcrEventType.splitProgress:
@@ -180,12 +215,30 @@ class _HomeScreenState extends State<HomeScreen> {
           );
           _pendingOcrResult = null;
         });
+        _sendCompletionNotification(_ocrResult!);
 
       case OcrEventType.error:
         _handleErrorEvent(event);
 
       case OcrEventType.log:
-        // 로그는 UI에 표시하지 않음
+        final level = event.logLevel ?? 'info';
+        final msg = event.logMessage ?? '';
+        // 메모리 경고 감지
+        if (level == 'warn' && msg.contains('메모리')) {
+          setState(() {
+            _showMemoryWarning = true;
+            _memoryWarningMessage = msg;
+          });
+        }
+        setState(() {
+          _logEntries.add(LogEntry(
+            level: level,
+            message: msg,
+            timestamp: DateTime.now(),
+          ));
+          // 최대 50개까지만 보관한다
+          if (_logEntries.length > 50) _logEntries.removeAt(0);
+        });
         break;
 
       case OcrEventType.modelSetup:
@@ -209,6 +262,13 @@ class _HomeScreenState extends State<HomeScreen> {
             ))
         .toList();
 
+    // Phase 변경 감지 — 후처리/PDF 생성 전환 시 ocrStartTime을 리셋한다
+    final currentStatus = _processingProgress?.statusText ?? '';
+    final newStatus = HomeStateHandler.translateProgressStatus(event.status);
+    final phaseChanged = currentStatus.isNotEmpty &&
+        currentStatus != newStatus &&
+        (newStatus.contains('후처리') || newStatus.contains('PDF 생성'));
+
     setState(() {
       _appState = OcrAppState.processing;
       if (_processingProgress != null) {
@@ -216,13 +276,15 @@ class _HomeScreenState extends State<HomeScreen> {
           currentPage: event.currentPage,
           totalPages: event.totalPages,
           percent: event.percent,
-          statusText: HomeStateHandler.translateProgressStatus(event.status),
+          statusText: newStatus,
           memoryMb: event.memoryMb,
           numWorkers: event.numWorkers,
           // 워커 정보가 있을 때만 갱신하고, 없으면 기존 값을 유지한다
           workerProgress: workerList.isNotEmpty ? workerList : null,
-          // 첫 progress 이벤트 시 ocrStartTime 설정 (모델 로딩 시간 제외)
-          ocrStartTime: _processingProgress!.ocrStartTime ?? DateTime.now(),
+          // Phase 변경 시 ocrStartTime 리셋 — 이전 Phase 소요시간 제외
+          ocrStartTime: phaseChanged
+              ? DateTime.now()
+              : (_processingProgress!.ocrStartTime ?? DateTime.now()),
         );
       } else {
         _processingProgress = ProcessingProgress(
@@ -237,6 +299,10 @@ class _HomeScreenState extends State<HomeScreen> {
           workerProgress: workerList,
         );
       }
+      // Phase 2에서 활성 모델 이름을 추적한다
+      if (event.modelName != null) {
+        _activeModelName = event.modelName;
+      }
     });
   }
 
@@ -250,10 +316,14 @@ class _HomeScreenState extends State<HomeScreen> {
         _isRecoverable = false;
       });
     } else if (_processingProgress != null) {
-      // 복구 가능한 에러 (페이지 스킵) -- 카운터만 증가
+      // 복구 가능한 에러 (페이지 스킵) -- 카운터 증가 + 페이지 번호 기록
+      final failedPage = event.currentPage;
+      final updatedFailed = List<int>.from(_processingProgress!.failedPages);
+      if (failedPage != null) updatedFailed.add(failedPage);
       setState(() {
         _processingProgress = _processingProgress!.copyWith(
           skippedPages: (_processingProgress?.skippedPages ?? 0) + 1,
+          failedPages: updatedFailed,
         );
       });
     }
@@ -310,6 +380,10 @@ class _HomeScreenState extends State<HomeScreen> {
         _downloadProgress = null;
         _pendingOcrResult = null;
         _modelSetupMessage = null;
+        _logEntries.clear();
+        _showMemoryWarning = false;
+        _memoryWarningMessage = null;
+        _activeModelName = null;
       });
     }
   }
@@ -336,7 +410,12 @@ class _HomeScreenState extends State<HomeScreen> {
       _errorMessage = null;
       _errorCode = null;
       _currentSplitCount = 1;
+      _originalTotalPages = 0;
       _modelSetupMessage = null;
+      _logEntries.clear();
+      _showMemoryWarning = false;
+      _memoryWarningMessage = null;
+      _activeModelName = null;
     });
   }
 
@@ -367,6 +446,11 @@ class _HomeScreenState extends State<HomeScreen> {
                     errorCode: _errorCode,
                     isRecoverable: _isRecoverable,
                     modelSetupMessage: _modelSetupMessage,
+                    originalTotalPages: _originalTotalPages,
+                    logEntries: _logEntries,
+                    showMemoryWarning: _showMemoryWarning,
+                    memoryWarningMessage: _memoryWarningMessage,
+                    activeModelName: _activeModelName,
                     onFileSelected: _onFileSelected,
                     onClearFile: _onClearFile,
                     onStartOcr: _onStartOcr,

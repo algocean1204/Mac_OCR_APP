@@ -66,6 +66,10 @@ class ErrorView extends StatelessWidget {
 
           // 에러 메시지 카드
           _buildErrorMessageCard(isDark),
+          const SizedBox(height: AppSpacing.md),
+
+          // 에러 코드에 기반한 문제 해결 안내
+          _buildTroubleshootingTips(isDark),
           const SizedBox(height: AppSpacing.xl),
 
           // 액션 버튼들
@@ -130,6 +134,107 @@ class ErrorView extends StatelessWidget {
         ],
       ),
     );
+  }
+
+  /// 에러 코드에 기반한 문제 해결 안내를 빌드한다.
+  Widget _buildTroubleshootingTips(bool isDark) {
+    final tips = _getTipsForError(errorCode);
+    if (tips.isEmpty) return const SizedBox.shrink();
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(AppSpacing.md),
+      decoration: BoxDecoration(
+        color: isDark ? const Color(0xFF1E2430) : AppColors.primaryLight,
+        borderRadius: BorderRadius.circular(AppRadius.md),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(
+                Icons.lightbulb_outline_rounded,
+                size: 14,
+                color: isDark ? Colors.white54 : AppColors.primary,
+              ),
+              const SizedBox(width: AppSpacing.xs),
+              Text(
+                '해결 방법',
+                style: TextStyle(
+                  fontSize: AppTextSize.bodySmall,
+                  fontWeight: FontWeight.w600,
+                  color: isDark ? Colors.white70 : AppColors.primary,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: AppSpacing.sm),
+          ...tips.map((tip) => Padding(
+                padding: const EdgeInsets.only(bottom: 4),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      '• ',
+                      style: TextStyle(
+                        fontSize: AppTextSize.bodySmall,
+                        color: isDark ? Colors.white54 : AppColors.textSecondary,
+                      ),
+                    ),
+                    Expanded(
+                      child: Text(
+                        tip,
+                        style: TextStyle(
+                          fontSize: AppTextSize.bodySmall,
+                          color:
+                              isDark ? Colors.white54 : AppColors.textSecondary,
+                          height: 1.4,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              )),
+        ],
+      ),
+    );
+  }
+
+  /// 에러 코드에 따른 해결 팁 목록을 반환한다.
+  List<String> _getTipsForError(String? code) {
+    switch (code) {
+      case 'E010':
+        return [
+          'PDF 파일이 손상되지 않았는지 확인하세요.',
+          '다른 PDF 뷰어에서 정상적으로 열리는지 확인하세요.',
+        ];
+      case 'E020':
+        return [
+          '메모리 부족일 수 있습니다. 다른 앱을 종료하고 재시도하세요.',
+          '페이지 수가 많은 경우 분할 기능을 사용해보세요.',
+        ];
+      case 'E030':
+        return [
+          '인터넷 연결을 확인하세요.',
+          '디스크 공간이 충분한지 확인하세요 (약 5GB 필요).',
+        ];
+      case 'E040':
+        return [
+          '메모리가 부족합니다. 실행 중인 다른 앱을 종료하세요.',
+          'PDF를 분할하여 처리해보세요.',
+        ];
+      case 'E050':
+        return [
+          '앱을 재시작하세요.',
+          '문제가 지속되면 앱을 재설치하세요.',
+        ];
+      default:
+        return [
+          '앱을 재시작한 후 다시 시도하세요.',
+          '문제가 지속되면 GitHub 이슈를 작성해주세요.',
+        ];
+    }
   }
 
   /// 액션 버튼들을 빌드한다.

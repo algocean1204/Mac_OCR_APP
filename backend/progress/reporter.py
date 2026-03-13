@@ -40,6 +40,7 @@ class ProgressReporter:
         memory_mb: int = 0,
         num_workers: int = 0,
         worker_progress: list[dict[str, int]] | None = None,
+        model_name: str | None = None,
     ) -> None:
         """현재 페이지 처리 진행률을 출력한다.
 
@@ -51,6 +52,7 @@ class ProgressReporter:
             num_workers: 활성 워커 총 수 (0이면 미포함)
             worker_progress: 워커별 진행 상태 목록 [{worker_id, completed, total}]
                              None이면 미포함 — 역호환성 유지
+            model_name: 현재 활성 모델 이름 (Phase 2 후처리 시 사용)
         """
         percent: float = round(current / total * 100, 2) if total > 0 else 0.0
 
@@ -70,6 +72,9 @@ class ProgressReporter:
             payload["num_workers"] = num_workers
         if worker_progress is not None:
             payload["worker_progress"] = worker_progress  # type: ignore[assignment]
+        # 활성 모델 이름이 제공된 경우에만 페이로드에 포함한다
+        if model_name is not None:
+            payload["model_name"] = model_name
 
         _emit(payload)
 

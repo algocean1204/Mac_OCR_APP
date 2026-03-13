@@ -198,6 +198,48 @@ class PdfGenerator:
                 detail=f"블록 결과 기반 페이지 {self._page_count + 1} 추가 실패: {exc}",
             ) from exc
 
+    def add_page_with_cached_positions(
+        self,
+        image: Image.Image,
+        ocr_text: str,
+        line_positions: list[dict],
+        page_width_pt: float,
+        page_height_pt: float,
+    ) -> None:
+        """캐시된 Tesseract 위치를 사용하여 PDF 페이지를 추가한다.
+
+        Phase 1에서 미리 추출한 위치 정보를 재활용하여
+        Phase 3에서 Tesseract 재호출(2-5초/페이지)을 방지한다.
+
+        Args:
+            image: 원본 페이지 이미지
+            ocr_text: OCR 텍스트
+            line_positions: Phase 1에서 캐시된 [{"x","y","x2","y2","text"}] 목록
+            page_width_pt: PDF 페이지 너비 (포인트)
+            page_height_pt: PDF 페이지 높이 (포인트)
+        """
+        try:
+            page_buf = _render_single_page_with_cached_positions(
+                image, ocr_text, line_positions, page_width_pt, page_height_pt,
+            )
+            page_bytes = page_buf.getvalue()
+            page_buf.close()
+
+            single_doc = fitz.open("pdf", page_bytes)
+            self._output_doc.insert_pdf(single_doc)
+            single_doc.close()
+            del page_bytes
+
+            self._page_count += 1
+
+        except OutputError:
+            raise
+        except Exception as exc:
+            raise OutputError(
+                code=ErrorCodes.OUTPUT_WRITE_FAILED,
+                detail=f"캐시 위치 기반 페이지 {self._page_count + 1} 추가 실패: {exc}",
+            ) from exc
+
     @property
     def page_count(self) -> int:
         """현재 추가된 페이지 수를 반환한다."""
@@ -223,6 +265,95 @@ def _render_single_page(
     c.save()
     buf.seek(0)
     return buf
+
+
+def _render_single_page_with_cached_positions(
+    image: Image.Image,
+    ocr_text: str,
+    line_positions: list[dict],
+    page_width: float,
+    page_height: float,
+) -> io.BytesIO:
+    """캐시된 Tesseract 위치로 단일 페이지 PDF를 생성한다.
+
+    Tesseract 재호출 없이 Phase 1에서 캐시된 위치를 직접 사용한다.
+    """
+    buf = io.BytesIO()
+    c = rl_canvas.Canvas(buf, pagesize=(page_width, page_height))
+
+    _draw_image_background(c, image, page_width, page_height)
+
+    if ocr_text and ocr_text.strip() and line_positions:
+        _draw_text_with_cached_positions(
+            c, ocr_text, line_positions, image, page_width, page_height,
+        )
+
+    c.showPage()
+    c.save()
+    buf.seek(0)
+    return buf
+
+
+def _draw_text_with_cached_positions(
+    canvas: rl_canvas.Canvas,
+    text: str,
+    line_positions: list[dict],
+    image: Image.Image,
+    page_width: float,
+    page_height: float,
+) -> None:
+    """캐시된 Tesseract 위치를 사용하여 텍스트를 투명하게 배치한다.
+
+    Phase 1에서 직렬화된 LinePosition 딕셔너리를 TextRegion으로 복원하고,
+    기존 map_ocr_to_pdf_positions로 OCR 줄을 매핑한다.
+    """
+    from backend.pdf.atoms.extract_line_positions import (
+        LinePosition,
+        TextRegion,
+        map_ocr_to_pdf_positions,
+    )
+
+    transparent = Color(0, 0, 0, alpha=0)
+    canvas.setFillColor(transparent)
+    canvas.setStrokeColor(transparent)
+
+    ocr_lines = [line for line in text.split("\n") if line.strip()]
+    if not ocr_lines:
+        canvas.setFillColor(black)
+        canvas.setStrokeColor(black)
+        return
+
+    # 캐시된 딕셔너리 → LinePosition 객체 복원
+    lps = [
+        LinePosition(
+            x=d["x"], y=d["y"], x2=d["x2"], y2=d["y2"],
+            text=d.get("text", ""),
+        )
+        for d in line_positions
+    ]
+
+    if not lps:
+        _place_lines_distributed(canvas, ocr_lines, page_width, page_height)
+        canvas.setFillColor(black)
+        canvas.setStrokeColor(black)
+        return
+
+    region = TextRegion(
+        top_y=min(p.y for p in lps),
+        bottom_y=max(p.y2 for p in lps),
+        left_x=min(p.x for p in lps),
+        right_x=max(p.x2 for p in lps),
+        lines=lps,
+    )
+
+    img_w, img_h = image.size
+    result = map_ocr_to_pdf_positions(
+        region, ocr_lines, img_w, img_h, page_width, page_height,
+    )
+    _place_lines(canvas, result.lines)
+
+    canvas.setFillColor(black)
+    canvas.setStrokeColor(black)
 
 
 def _render_single_page_with_blocks(

@@ -13,6 +13,10 @@ class HomeStateHandler {
         return '이미지 추출 중';
       case 'ocr_processing':
         return 'OCR 추론 중';
+      case 'post_processing':
+        return '앙상블 후처리 중';
+      case 'generating_pdf':
+        return 'PDF 생성 중';
       case 'writing_output':
         return 'PDF 생성 중';
       case 'page_complete':

@@ -22,6 +22,7 @@ from pathlib import Path
 from backend.config.model_registry import SUPPORTED_MODELS
 from backend.config.settings import PipelineConfig
 from backend.errors.handler import ErrorHandler
+from backend.memory.manager import get_memory_mb
 from backend.model.downloader import ModelDownloader
 from backend.ocr.post_processor import PostProcessor
 from backend.pdf.splitter import split_pdf
@@ -86,9 +87,9 @@ class PipelineController:
                 total_pages=total_pages,
             )
 
-            # OCR 결과 수집 — 워커들이 저장한 JSON에서 텍스트와 블록 결과를 읽는다
-            page_texts, page_block_results = self._collect_ocr_results(
-                temp_dir, total_pages
+            # OCR 결과 수집 — 워커들이 저장한 JSON에서 텍스트, 블록 결과, 위치 캐시를 읽는다
+            page_texts, page_block_results, page_line_positions = (
+                self._collect_ocr_results(temp_dir, total_pages)
             )
 
             # === Phase 2: 순차 후처리 ===
@@ -105,6 +106,7 @@ class PipelineController:
                 output_path=output_path,
                 total_pages=total_pages,
                 page_block_results=page_block_results,
+                page_line_positions=page_line_positions,
             )
 
             # 완료 보고
@@ -179,20 +181,22 @@ class PipelineController:
 
     def _collect_ocr_results(
         self, temp_dir: Path, total_pages: int,
-    ) -> tuple[dict[int, str], dict[int, list[dict]]]:
-        """워커가 저장한 JSON에서 OCR 결과와 블록 결과를 수집한다.
+    ) -> tuple[dict[int, str], dict[int, list[dict]], dict[int, list[dict]]]:
+        """워커가 저장한 JSON에서 OCR 결과, 블록 결과, 위치 캐시를 수집한다.
 
         Args:
             temp_dir: JSON 파일이 저장된 임시 디렉토리
             total_pages: 전체 페이지 수
 
         Returns:
-            (page_texts, page_block_results) 튜플
+            (page_texts, page_block_results, page_line_positions) 튜플
             - page_texts: {page_num: text} 딕셔너리
             - page_block_results: {page_num: block_results} 딕셔너리
+            - page_line_positions: {page_num: line_positions} 딕셔너리 (Tesseract 캐시)
         """
         page_texts: dict[int, str] = {}
         page_block_results: dict[int, list[dict]] = {}
+        page_line_positions: dict[int, list[dict]] = {}
 
         for json_path in sorted(temp_dir.glob("ocr_results_worker_*.json")):
             try:
@@ -201,22 +205,26 @@ class PipelineController:
                     page_num = entry.get("page_num", -1)
                     text = entry.get("text", "")
                     block_results = entry.get("block_results")
+                    line_positions = entry.get("line_positions")
                     if page_num >= 0:
                         page_texts[page_num] = text
                         if block_results is not None:
                             page_block_results[page_num] = block_results
+                        if line_positions is not None:
+                            page_line_positions[page_num] = line_positions
             except Exception as exc:
                 self._reporter.report_log(
                     "warn", f"OCR 결과 읽기 실패: {json_path.name} — {exc}"
                 )
 
         n_block = len(page_block_results)
+        n_cached = len(page_line_positions)
         self._reporter.report_log(
             "info",
             f"OCR 결과 수집: {len(page_texts)}/{total_pages} 페이지 "
-            f"(블록 위치 정보: {n_block}페이지)",
+            f"(블록 위치: {n_block}, Tesseract 캐시: {n_cached})",
         )
-        return page_texts, page_block_results
+        return page_texts, page_block_results, page_line_positions
 
     # ── Phase 2: 앙상블 후처리 ────────────────────────────────────────────────
 
@@ -250,16 +258,65 @@ class PipelineController:
         # versions[model_idx][page_num] = 교정된 텍스트
         versions: list[dict[int, str]] = []
 
+        total_models = min(len(post_model_dirs), 3)
+        total_pages = len(page_texts)
+        sorted_pages = sorted(page_texts.keys())
+        # 전체 작업량: 모델 수 × 페이지 수 (전체 진행률 계산용)
+        total_work = total_models * total_pages
+
+        # 콘텐츠 타입 사전 분류 — DeepSeek-R1 선택적 스킵에 사용한다
+        # rule-based 분류이므로 추가 비용 없음 (모델 로드 불필요)
+        from backend.ocr.atoms.classify_content import ContentType, classify_text
+
+        _REASONING_TYPES = {ContentType.MATH, ContentType.CODE, ContentType.TABLE}
+        pages_needing_reasoning: set[int] = set()
+
+        for page_num, text in page_texts.items():
+            ct = classify_text(text)
+            if ct in _REASONING_TYPES:
+                pages_needing_reasoning.add(page_num)
+
+        n_reasoning = len(pages_needing_reasoning)
+        self._reporter.report_log(
+            "info",
+            f"콘텐츠 분류 완료: {n_reasoning}/{total_pages} 페이지에 수학/코드/표 포함",
+        )
+
         for step_idx, (model_id, model_dir) in enumerate(post_model_dirs[:3]):
+            # 모델 전환 시 취소 상태를 확인한다
+            if self._cancelled:
+                self._reporter.report_log("info", "취소 요청 — 후처리 모델 전환 중단")
+                break
+
             mode = model_modes[step_idx] if step_idx < len(model_modes) else "korean"
-            total_models = min(len(post_model_dirs), 3)
+
+            version: dict[int, str] = {}
+
+            # DeepSeek-R1 전체 스킵: 수학/코드/표 콘텐츠가 없으면 모델 로드 자체를 건너뛴다
+            # 모델 로드(15-20초) + 전 페이지 추론 시간을 절약한다
+            if mode == "reasoning" and not pages_needing_reasoning:
+                self._reporter.report_log(
+                    "info",
+                    f"앙상블 {step_idx + 1}/{total_models} 스킵: "
+                    f"수학/코드/표 콘텐츠 없음 — {model_id}",
+                )
+                for page_idx, page_num in enumerate(sorted_pages):
+                    version[page_num] = page_texts[page_num]
+                    completed = step_idx * total_pages + page_idx + 1
+                    mem_mb = int(get_memory_mb())
+                    self._reporter.report_progress(
+                        completed, total_work, "post_processing",
+                        memory_mb=mem_mb,
+                        model_name=model_id,
+                    )
+                versions.append(version)
+                continue
 
             self._reporter.report_log(
                 "info",
                 f"앙상블 {step_idx + 1}/{total_models} 시작: {model_id} (모드: {mode})",
             )
 
-            version: dict[int, str] = {}
             processor = PostProcessor()
 
             try:
@@ -267,17 +324,35 @@ class PipelineController:
                 self._reporter.report_log("info", f"후처리 모델 로드 완료: {model_id}")
 
                 # 모든 페이지에 독립 교정 적용 — 원본 OCR 텍스트 기반
-                for page_num in sorted(page_texts.keys()):
+                for page_idx, page_num in enumerate(sorted_pages):
+                    # 페이지 단위 취소 확인
+                    if self._cancelled:
+                        self._reporter.report_log("info", "취소 요청 — 후처리 중단")
+                        break
+
                     text = page_texts[page_num]
                     if not text.strip():
                         version[page_num] = text
-                        continue
+                    elif mode == "reasoning" and page_num not in pages_needing_reasoning:
+                        # 수학/코드/표가 아닌 페이지는 원본 유지 (추론 비용 절약)
+                        version[page_num] = text
+                    else:
+                        try:
+                            refined = processor.refine_text(text, mode=mode)
+                            version[page_num] = refined
+                        except Exception:
+                            version[page_num] = text  # 교정 실패 — 원본 유지
 
-                    try:
-                        refined = processor.refine_text(text, mode=mode)
-                        version[page_num] = refined
-                    except Exception:
-                        version[page_num] = text  # 교정 실패 — 원본 유지
+                    # 후처리 진행률 보고 — 전체 모델×페이지 기준 + 메모리 사용량
+                    completed = step_idx * total_pages + page_idx + 1
+                    mem_mb = int(get_memory_mb())
+                    self._reporter.report_progress(
+                        completed,
+                        total_work,
+                        "post_processing",
+                        memory_mb=mem_mb,
+                        model_name=model_id,
+                    )
 
                 self._reporter.report_log(
                     "info", f"앙상블 {step_idx + 1}/{total_models} 완료: {model_id}"
@@ -390,11 +465,13 @@ class PipelineController:
         output_path: Path,
         total_pages: int,
         page_block_results: dict[int, list[dict]] | None = None,
+        page_line_positions: dict[int, list[dict]] | None = None,
     ) -> None:
         """교정된 텍스트 + 원본 이미지로 최종 PDF를 생성한다.
 
         블록 결과가 있는 페이지는 정확한 위치에 텍스트를 배치하고,
-        없는 페이지는 기존 방식(Tesseract 위치 기반)으로 폴백한다.
+        캐시된 Tesseract 위치가 있으면 재호출 없이 사용하며,
+        둘 다 없는 페이지는 기존 방식(Tesseract 실시간 호출)으로 폴백한다.
 
         Args:
             pdf_path: 원본 PDF 파일 경로
@@ -402,6 +479,7 @@ class PipelineController:
             output_path: 출력 PDF 경로
             total_pages: 전체 페이지 수
             page_block_results: {page_num: block_results} 블록 위치 정보 (선택)
+            page_line_positions: {page_num: line_positions} Tesseract 캐시 (선택)
         """
         from PIL import Image
 
@@ -410,6 +488,8 @@ class PipelineController:
 
         if page_block_results is None:
             page_block_results = {}
+        if page_line_positions is None:
+            page_line_positions = {}
 
         extractor = PdfExtractor(dpi=self._config.dpi)
         extractor.open(pdf_path)
@@ -428,12 +508,18 @@ class PipelineController:
                 generator = PdfGenerator(chunk_path)
 
                 for page_num in range(chunk_start, chunk_end):
+                    # 페이지 단위 취소 확인
+                    if self._cancelled:
+                        self._reporter.report_log("info", "취소 요청 — PDF 생성 중단")
+                        break
+
                     image: Image.Image | None = None
                     try:
                         image = extractor.extract_page_image(page_num)
                         page_width, page_height = extractor.get_page_size(page_num)
                         text = page_texts.get(page_num, "")
                         block_results = page_block_results.get(page_num)
+                        line_positions = page_line_positions.get(page_num)
 
                         if block_results:
                             # 블록 결과가 있으면 정확한 위치에 배치
@@ -441,8 +527,14 @@ class PipelineController:
                                 image, block_results,
                                 page_width, page_height,
                             )
+                        elif text.strip() and line_positions:
+                            # 캐시된 Tesseract 위치 사용 — 재호출 방지
+                            generator.add_page_with_cached_positions(
+                                image, text, line_positions,
+                                page_width, page_height,
+                            )
                         elif text.strip():
-                            # 폴백: 기존 방식 (Tesseract 위치 기반)
+                            # 폴백: Tesseract 실시간 호출
                             generator.add_page(
                                 image, text, page_width, page_height,
                             )
@@ -459,9 +551,19 @@ class PipelineController:
                             except Exception:
                                 pass
 
+                    # PDF 생성 진행률 보고 — 10페이지마다 또는 마지막 페이지
+                    if (page_num + 1) % 10 == 0 or page_num + 1 == total_pages:
+                        self._reporter.report_progress(
+                            page_num + 1, total_pages, "generating_pdf",
+                        )
+
                 if generator.page_count > 0:
                     generator.save()
                     chunk_paths.append(chunk_path)
+
+                # 청크 루프도 취소 시 중단한다
+                if self._cancelled:
+                    break
 
             extractor.close()
 

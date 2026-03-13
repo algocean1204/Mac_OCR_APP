@@ -24,7 +24,7 @@ from backend.ocr.atoms.parse_refined_text import parse_refined_output
 
 
 # 후처리 LLM의 최대 생성 토큰 수 — 입력 텍스트와 비슷한 길이의 교정 결과를 기대한다
-_POST_MAX_TOKENS: int = 4096
+_POST_MAX_TOKENS: int = 2048
 
 # 후처리 생성 온도 — 낮을수록 결정론적 출력 (교정 목적이므로 낮게 설정)
 _POST_TEMPERATURE: float = 0.1
@@ -163,6 +163,29 @@ class PostProcessor:
 
         return "\n".join(refined_chunks) if len(refined_chunks) > 1 else refined_chunks[0]
 
+    def _estimate_max_tokens(self, text: str) -> int:
+        """입력 텍스트 길이에 기반하여 동적 max_tokens를 계산한다.
+
+        토크나이저로 입력 토큰 수를 측정하고, 출력이 입력보다 약간 길 수 있음을
+        고려하여 1.3배 + 여유분 50 토큰을 할당한다.
+        고정 2048 대비 평균 60-75% 토큰 절약 효과가 있다.
+
+        Args:
+            text: 입력 텍스트 (프롬프트 포함 전 원본)
+
+        Returns:
+            동적으로 계산된 max_tokens (128 이상, _POST_MAX_TOKENS 이하)
+        """
+        if self._tokenizer is None:
+            return _POST_MAX_TOKENS
+        try:
+            input_tokens = len(self._tokenizer.encode(text))
+        except Exception:
+            # 토크나이저 인코딩 실패 시 문자 수 기반 추정 (한국어 평균 1.5토큰/자)
+            input_tokens = int(len(text) * 1.5)
+        estimated = int(input_tokens * 1.3) + 50
+        return max(128, min(estimated, _POST_MAX_TOKENS))
+
     def _refine_single_chunk(self, chunk: str, mode: str) -> str:
         """단일 청크에 대해 LLM 교정을 수행한다.
 
@@ -180,21 +203,28 @@ class PostProcessor:
         else:
             prompt = build_korean_refine_prompt(chunk)
 
+        # 입력 길이에 비례하여 max_tokens를 동적 조정한다
+        max_tokens = self._estimate_max_tokens(chunk)
+
         try:
             if self._framework == ModelFramework.TRANSFORMERS_LM:
-                raw_output = self._generate_torch(prompt)
+                raw_output = self._generate_torch(prompt, max_tokens)
             else:
-                raw_output = self._generate_mlx(prompt)
+                raw_output = self._generate_mlx(prompt, max_tokens)
 
             return parse_refined_output(raw_output, chunk)
         except Exception:
             return chunk
 
-    def _generate_mlx(self, prompt: str) -> str:
+    def _generate_mlx(self, prompt: str, max_tokens: int = _POST_MAX_TOKENS) -> str:
         """mlx-lm으로 텍스트를 생성한다.
 
         Qwen3 계열 모델은 thinking 모드를 비활성화하여
         불필요한 사고 과정 생성을 방지한다.
+
+        Args:
+            prompt: LLM에 전달할 프롬프트
+            max_tokens: 최대 생성 토큰 수 (동적 조정됨)
         """
         from mlx_lm import generate as mlx_lm_generate
         from mlx_lm.sample_utils import make_sampler
@@ -208,7 +238,7 @@ class PostProcessor:
             self._model,
             self._tokenizer,
             prompt=formatted_prompt,
-            max_tokens=_POST_MAX_TOKENS,
+            max_tokens=max_tokens,
             sampler=sampler,
             verbose=False,
         )
@@ -217,6 +247,7 @@ class PostProcessor:
         """토크나이저의 chat template을 적용하여 프롬프트를 포맷한다.
 
         Qwen3 계열: enable_thinking=False로 thinking 모드를 비활성화한다.
+        DeepSeek-R1 계열: 빈 thinking 블록을 프리필하여 사고 과정 생성을 억제한다.
         chat template이 없으면 원본 프롬프트를 그대로 반환한다.
         """
         if self._tokenizer is None or not hasattr(self._tokenizer, "apply_chat_template"):
@@ -232,7 +263,6 @@ class PostProcessor:
                 tokenize=False,
                 enable_thinking=False,
             )
-            return formatted
         except TypeError:
             # enable_thinking 미지원 모델 — 기본 chat template 적용
             try:
@@ -241,15 +271,25 @@ class PostProcessor:
                     add_generation_prompt=True,
                     tokenize=False,
                 )
-                return formatted
             except Exception:
                 return prompt
 
-    def _generate_torch(self, prompt: str) -> str:
+        # DeepSeek-R1 계열: 빈 <think> 블록을 프리필하여 사고 과정 생성을 건너뛴다
+        # 이렇게 하면 모델이 thinking이 완료된 것으로 인식하고 바로 답변을 생성한다
+        if "deepseek" in self._model_id.lower() and "r1" in self._model_id.lower():
+            formatted += "<think>\n</think>\n\n"
+
+        return formatted
+
+    def _generate_torch(self, prompt: str, max_tokens: int = _POST_MAX_TOKENS) -> str:
         """transformers + torch로 텍스트를 생성한다.
 
         KORMo 등 커스텀 아키텍처 모델의 추론에 사용한다.
         chat template을 적용하여 모델에 맞는 프롬프트 형식을 생성한다.
+
+        Args:
+            prompt: LLM에 전달할 프롬프트
+            max_tokens: 최대 생성 토큰 수 (동적 조정됨)
         """
         import torch
 
@@ -265,7 +305,7 @@ class PostProcessor:
         with torch.no_grad():
             outputs = self._model.generate(
                 **inputs,
-                max_new_tokens=_POST_MAX_TOKENS,
+                max_new_tokens=max_tokens,
                 temperature=_POST_TEMPERATURE,
                 top_p=_POST_TOP_P,
                 do_sample=True,

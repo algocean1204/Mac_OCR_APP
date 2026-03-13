@@ -36,48 +36,64 @@ class CompleteView extends StatelessWidget {
           width: 1.5,
         ),
       ),
-      child: Column(
-        children: [
-          _buildSuccessIcon(),
-          const SizedBox(height: AppSpacing.lg),
-          // 분할 여부에 따라 완료 문구를 다르게 표시한다.
-          Text(
-            result.isSplit ? '변환 및 분할 완료!' : '변환 완료!',
-            style: TextStyle(
-              fontSize: AppTextSize.heading2,
-              fontWeight: FontWeight.bold,
-              color: isDark ? Colors.white : AppColors.textPrimary,
+      child: SingleChildScrollView(
+        child: Column(
+          children: [
+            _buildSuccessIcon(),
+            const SizedBox(height: AppSpacing.lg),
+            // 분할 여부에 따라 완료 문구를 다르게 표시한다.
+            Text(
+              result.isSplit ? '변환 및 분할 완료!' : '변환 완료!',
+              style: TextStyle(
+                fontSize: AppTextSize.heading2,
+                fontWeight: FontWeight.bold,
+                color: isDark ? Colors.white : AppColors.textPrimary,
+              ),
             ),
-          ),
-          const SizedBox(height: AppSpacing.xl),
-          CompleteStatsCard(result: result),
+            const SizedBox(height: AppSpacing.xl),
+            CompleteStatsCard(result: result),
 
-          // 분할 파일 목록 -- 분할이 수행된 경우에만 표시한다.
-          if (result.isSplit) ...[
-            const SizedBox(height: AppSpacing.md),
-            _buildSplitPartsList(isDark),
+            // 분할 파일 목록 -- 분할이 수행된 경우에만 표시한다.
+            if (result.isSplit) ...[
+              const SizedBox(height: AppSpacing.md),
+              _buildSplitPartsList(isDark),
+            ],
+
+            const SizedBox(height: AppSpacing.xl),
+            _buildActionButtons(context),
           ],
-
-          const SizedBox(height: AppSpacing.xl),
-          _buildActionButtons(context),
-        ],
+        ),
       ),
     );
   }
 
-  /// 성공 체크 아이콘을 빌드한다.
+  /// 성공 체크 아이콘을 스케일+페이드 애니메이션과 함께 빌드한다.
   Widget _buildSuccessIcon() {
-    return Container(
-      width: 72,
-      height: 72,
-      decoration: BoxDecoration(
-        color: AppColors.success.withAlpha(26),
-        shape: BoxShape.circle,
-      ),
-      child: const Icon(
-        Icons.check_circle_rounded,
-        size: 44,
-        color: AppColors.success,
+    return TweenAnimationBuilder<double>(
+      tween: Tween(begin: 0.0, end: 1.0),
+      duration: const Duration(milliseconds: 600),
+      curve: Curves.elasticOut,
+      builder: (context, value, child) {
+        return Transform.scale(
+          scale: value,
+          child: Opacity(
+            opacity: value.clamp(0.0, 1.0),
+            child: child,
+          ),
+        );
+      },
+      child: Container(
+        width: 72,
+        height: 72,
+        decoration: BoxDecoration(
+          color: AppColors.success.withAlpha(26),
+          shape: BoxShape.circle,
+        ),
+        child: const Icon(
+          Icons.check_circle_rounded,
+          size: 44,
+          color: AppColors.success,
+        ),
       ),
     );
   }

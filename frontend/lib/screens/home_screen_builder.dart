@@ -31,6 +31,15 @@ class HomeScreenBuilder {
     required bool isRecoverable,
     // 모델 초기 설정 중 메시지 (서드파티 stderr 출력 감지 시)
     String? modelSetupMessage,
+    // Phase 1에서 수신한 원래 총 페이지 수 (Phase 2 진행률 표시에 사용)
+    int originalTotalPages = 0,
+    // 로그 메시지 목록 — ProgressView에 전달한다
+    List<LogEntry> logEntries = const [],
+    // 메모리 경고 표시 여부 및 메시지
+    bool showMemoryWarning = false,
+    String? memoryWarningMessage,
+    // 현재 활성 모델 이름 (Phase 2 후처리 중)
+    String? activeModelName,
     required void Function(String) onFileSelected,
     required VoidCallback onClearFile,
     required void Function(int splitCount) onStartOcr,
@@ -74,6 +83,12 @@ class HomeScreenBuilder {
                 progress: processingProgress,
                 // 분할 진행 상태를 넘겨 분할 중 UI를 표시한다.
                 splitProgress: splitProgress,
+                // Phase 2 후처리 시 모델별 진행률 계산에 사용
+                originalTotalPages: originalTotalPages,
+                logEntries: logEntries,
+                showMemoryWarning: showMemoryWarning,
+                memoryWarningMessage: memoryWarningMessage,
+                activeModelName: activeModelName,
                 onCancel: onCancel,
               );
 

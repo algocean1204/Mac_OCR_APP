@@ -1,6 +1,8 @@
 // 파일 선택 완료 후 표시되는 뷰
 // 선택된 파일 정보, 분할 권 수 입력 필드, 변환 시작 버튼을 표시한다.
 
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -138,7 +140,7 @@ class _FileSelectedViewState extends State<FileSelectedView> {
               ),
               const SizedBox(height: 2),
               Text(
-                widget.filePath,
+                '${_formatFileSize(File(widget.filePath).lengthSync())} — ${widget.filePath}',
                 style: TextStyle(
                   fontSize: AppTextSize.caption,
                   color: isDark ? Colors.white38 : AppColors.textTertiary,
@@ -306,6 +308,18 @@ class _FileSelectedViewState extends State<FileSelectedView> {
         child: Icon(icon, size: 18),
       ),
     );
+  }
+
+  /// 바이트 단위 파일 크기를 읽기 쉬운 문자열로 포맷한다.
+  String _formatFileSize(int bytes) {
+    if (bytes >= 1024 * 1024 * 1024) {
+      return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(1)} GB';
+    } else if (bytes >= 1024 * 1024) {
+      return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+    } else if (bytes >= 1024) {
+      return '${(bytes / 1024).toStringAsFixed(0)} KB';
+    }
+    return '$bytes B';
   }
 
   /// 변환 시작 버튼을 빌드한다.
