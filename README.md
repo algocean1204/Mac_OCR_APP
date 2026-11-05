@@ -10,7 +10,7 @@ GLM-OCR 비전 모델로 텍스트를 추출한 뒤 LLM 3개가 각자 교정한
 
 > AI 모델 없이 Apple Vision으로 빠르게 처리하는 경량판은 [Mac_OCR_APP_light](https://github.com/algocean1204/Mac_OCR_APP_light)에 있습니다.
 
-![License](https://img.shields.io/badge/License-AGPL--3.0-green?style=flat-square)
+![License](https://img.shields.io/badge/License-Apache%202.0-blue?style=flat-square)
 ![Chip](https://img.shields.io/badge/Chip-Apple%20Silicon-blue?style=flat-square&logo=apple)
 
 <p align="center">
@@ -146,4 +146,4 @@ python -m backend.main --input document.pdf --post-mode korean
 
 ## 라이선스
 
-[GNU AGPL-3.0](LICENSE). 내부에서 사용하는 PyMuPDF의 라이선스 정책을 따릅니다. 이 코드를 사용한 파생 프로그램이나 이를 백엔드로 쓰는 네트워크 서비스를 제공하는 경우 전체 소스 코드를 같은 라이선스로 공개해야 합니다.
+[Apache License 2.0](LICENSE)
